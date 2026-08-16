@@ -24,7 +24,7 @@ sub from_headers {
     my %h = map { lc($_) => $headers->{$_} } keys %$headers;
 
     my $source = exists $h{'ratelimit-limit'} || exists $h{'ratelimit-remaining'} || exists $h{'ratelimit-reset'}
-        ? 'standard'
+        ? 'ratelimit'
         : exists $h{'x-ratelimit-limit'} || exists $h{'x-ratelimit-remaining'} || exists $h{'x-ratelimit-reset'}
             ? 'x-ratelimit'
             : undef;
@@ -100,8 +100,10 @@ HTTP::API::Client::RateLimit - Normalized HTTP API rate-limit metadata
 
 =head1 DESCRIPTION
 
-Represents rate-limit information parsed from standard C<RateLimit-*> headers
-and the widely-used C<X-RateLimit-*> family. C<Retry-After> is also captured.
+Represents rate-limit information parsed from the C<RateLimit-Limit>,
+C<RateLimit-Remaining>, and C<RateLimit-Reset> header family used by earlier
+IETF rate-limit drafts, plus the widely-used C<X-RateLimit-*> family.
+C<Retry-After> is also captured.
 
 =head1 METHODS
 
