@@ -1,6 +1,7 @@
 use strict;
 use warnings;
 use Test::More;
+use HTTP::API::Client;
 use HTTP::API::Client::Pagination;
 
 {
@@ -82,5 +83,36 @@ my $repeat = HTTP::API::Client::Pagination->new(
 my $error;
 eval { $repeat->all; 1 } or $error = $@;
 like($error, qr/pagination continuation repeated/, 'repeated continuation is guarded');
+
+my @urls;
+my $api = HTTP::API::Client->new(
+    base_url => 'https://api.example.test',
+    transport => sub {
+        my ($method, $url) = @_;
+        push @urls, $url;
+        return {
+            status  => 200,
+            reason  => 'OK',
+            headers => { 'content-type' => 'application/json' },
+            content => $url =~ /page=2/
+                ? '{"items":[3]}'
+                : '{"items":[1,2]}',
+        };
+    },
+);
+my $integrated = $api->paginate(
+    '/things',
+    mode      => 'page',
+    page_size => 2,
+);
+is_deeply(scalar($integrated->all), [1, 2, 3], 'client paginate entry point');
+is_deeply(
+    \@urls,
+    [
+        'https://api.example.test/things?page=1&per_page=2',
+        'https://api.example.test/things?page=2&per_page=2',
+    ],
+    'client joins paginated URLs against base URL',
+);
 
 done_testing;
