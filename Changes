@@ -1,5 +1,11 @@
 Revision history for HTTP-API-Client
 
+0.04  2026-08-16
+    - Add normalized rate-limit metadata on responses and errors.
+    - Parse RateLimit-* and X-RateLimit-* quota headers.
+    - Expose limit, remaining, used, resource, reset, and wait_seconds helpers.
+    - Treat exhausted 403/429 responses as retryable and use reset metadata as a fallback delay.
+
 0.03  2026-08-16
     - Add a common pagination iterator API.
     - Support next-URL, page-number, and cursor pagination modes.
