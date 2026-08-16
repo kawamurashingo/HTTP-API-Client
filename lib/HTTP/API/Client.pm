@@ -5,7 +5,7 @@ use warnings;
 use HTTP::Tiny;
 use JSON::PP qw(encode_json);
 use Scalar::Util qw(blessed);
-use Time::HiRes qw(sleep);
+use Time::HiRes qw(sleep time);
 
 use HTTP::API::Client::Response;
 use HTTP::API::Client::Error;
@@ -128,12 +128,20 @@ sub request {
         my $hook_error = _run_hooks($hooks->{before_request}, $context);
         die _hook_error($hook_error, $method, $url) if $hook_error;
 
-        my ($response, $error) = $self->_request_once(
+        my $started_at = time;
+        $context->{started_at} = $started_at;
+
+        my ($response, $error, $elapsed) = $self->_request_once(
             $context->{method},
             $context->{url},
             $context->{headers},
             $context->{content},
         );
+
+        $context->{elapsed} = $elapsed;
+        $context->{request_id} = $response
+            ? $response->request_id
+            : $error ? $error->request_id : undef;
 
         if ($response) {
             my $after_error = _run_hooks($hooks->{after_response}, $response, $context);
@@ -156,6 +164,7 @@ sub request {
 sub _request_once {
     my ($self, $method, $url, $headers, $content) = @_;
     my $raw;
+    my $started_at = time;
 
     eval {
         if ($self->{transport}) {
@@ -173,24 +182,29 @@ sub _request_once {
         1;
     } or do {
         my $cause = $@;
-        return (undef, $cause) if blessed($cause) && $cause->isa('HTTP::API::Client::Error');
+        return (undef, $cause, time - $started_at) if blessed($cause) && $cause->isa('HTTP::API::Client::Error');
+        my $elapsed = time - $started_at;
         return (undef, HTTP::API::Client::Error->new(
             category  => 'transport',
             method    => $method,
             url       => $url,
             retryable => 1,
+            elapsed   => $elapsed,
             message   => "HTTP transport failed: $cause",
-        ));
+        ), $elapsed);
     };
 
     if (ref($raw) ne 'HASH' || !exists $raw->{status}) {
+        my $elapsed = time - $started_at;
         return (undef, HTTP::API::Client::Error->new(
             category => 'transport', method => $method, url => $url,
             retryable => 1,
+            elapsed => $elapsed,
             message => 'HTTP transport returned an invalid response',
-        ));
+        ), $elapsed);
     }
 
+    my $elapsed = time - $started_at;
     my $response = HTTP::API::Client::Response->new(
         status  => 0 + $raw->{status},
         reason  => $raw->{reason},
@@ -198,9 +212,10 @@ sub _request_once {
         content => defined($raw->{content}) ? $raw->{content} : '',
         method  => $method,
         url     => $url,
+        elapsed => $elapsed,
     );
 
-    return ($response, undef) if $response->is_success;
+    return ($response, undef, $elapsed) if $response->is_success;
 
     my $rate_limit = $response->rate_limit;
     my $rate_limited = ($response->status == 403 || $response->status == 429)
@@ -213,10 +228,11 @@ sub _request_once {
         url         => $url,
         retryable   => _retryable_status($response->status) || $rate_limited,
         retry_after => $response->header('retry-after'),
-        request_id  => _request_id($response),
+        request_id  => $response->request_id,
+        elapsed     => $elapsed,
         response    => $response,
         message     => sprintf('HTTP %d%s', $response->status, defined($response->reason) && length($response->reason) ? ' ' . $response->reason : ''),
-    ));
+    ), $elapsed);
 }
 
 sub _normalize_hooks {
@@ -396,15 +412,6 @@ sub _retryable_status {
     return 1 if $status == 408 || $status == 425 || $status == 429;
     return 1 if $status >= 500 && $status <= 599;
     return 0;
-}
-
-sub _request_id {
-    my ($response) = @_;
-    for my $name (qw(x-request-id request-id x-correlation-id)) {
-        my $value = $response->header($name);
-        return $value if defined $value && length $value;
-    }
-    return undef;
 }
 
 1;

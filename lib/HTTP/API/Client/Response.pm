@@ -15,6 +15,7 @@ sub new {
         content => defined($args{content}) ? $args{content} : '',
         method  => $args{method},
         url     => $args{url},
+        elapsed => $args{elapsed},
     }, $class;
 }
 
@@ -23,6 +24,15 @@ sub reason  { $_[0]->{reason} }
 sub headers { +{ %{ $_[0]->{headers} } } }
 sub content { $_[0]->{content} }
 sub method  { $_[0]->{method} }
+sub elapsed { $_[0]->{elapsed} }
+sub request_id {
+    my ($self) = @_;
+    for my $name (qw(x-request-id request-id x-correlation-id)) {
+        my $value = $self->header($name);
+        return $value if defined $value && length $value;
+    }
+    return undef;
+}
 sub url     { $_[0]->{url} }
 sub is_success { $_[0]->{status} >= 200 && $_[0]->{status} < 300 }
 sub header { my ($self, $name) = @_; return $self->{headers}{lc $name} }

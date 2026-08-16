@@ -43,6 +43,32 @@ my $response = $api->get('/users',
 
 Values are percent-encoded. Array references generate repeated keys, undefined values are omitted, existing query strings are preserved, and parameters are inserted before URL fragments. `before_request` hooks see the final encoded URL.
 
+## Observability
+
+Responses expose transport elapsed time and common request IDs without choosing a logging, metrics, tracing, or telemetry framework:
+
+```perl
+my $response = $api->get('/users');
+
+say $response->elapsed;
+say $response->request_id if defined $response->request_id;
+```
+
+`request_id` recognizes `X-Request-Id`, `Request-Id`, and `X-Correlation-Id`.
+
+Lifecycle hooks receive the same per-attempt metadata in their context. `started_at` is captured immediately before transport begins, `elapsed` measures transport time, and `request_id` is populated before `after_response` or `on_error` runs.
+
+```perl
+hooks => {
+    after_response => sub {
+        my ($response, $ctx) = @_;
+        $metrics->observe($ctx->{elapsed});
+    },
+}
+```
+
+HTTP and transport errors also expose `elapsed`; HTTP errors retain the normalized request ID.
+
 ## Hooks
 
 Client-level and per-request hooks make it possible to add authentication, logging, metrics, tracing, or other cross-cutting behavior without subclassing.
@@ -185,6 +211,8 @@ $api->post('/jobs',
 - configurable timeout
 - structured transport/HTTP/encode/decode errors
 - request ID extraction
+- response and error elapsed-time observability
+- per-attempt observability metadata in lifecycle hook contexts
 - automatic retry with exponential backoff + jitter
 - normalized rate-limit metadata and reset-aware retry fallback
 - next-URL, page-number, and cursor pagination
