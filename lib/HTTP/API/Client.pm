@@ -5,7 +5,7 @@ use warnings;
 use HTTP::Tiny;
 use JSON::PP qw(encode_json);
 use Scalar::Util qw(blessed);
-use Time::HiRes qw(sleep);
+use Time::HiRes qw(sleep time);
 
 use HTTP::API::Client::Response;
 use HTTP::API::Client::Error;
@@ -128,12 +128,20 @@ sub request {
         my $hook_error = _run_hooks($hooks->{before_request}, $context);
         die _hook_error($hook_error, $method, $url) if $hook_error;
 
-        my ($response, $error) = $self->_request_once(
+        my $started_at = time;
+        $context->{started_at} = $started_at;
+
+        my ($response, $error, $elapsed) = $self->_request_once(
             $context->{method},
             $context->{url},
             $context->{headers},
             $context->{content},
         );
+
+        $context->{elapsed} = $elapsed;
+        $context->{request_id} = $response
+            ? $response->request_id
+            : $error ? $error->request_id : undef;
 
         if ($response) {
             my $after_error = _run_hooks($hooks->{after_response}, $response, $context);
@@ -156,6 +164,7 @@ sub request {
 sub _request_once {
     my ($self, $method, $url, $headers, $content) = @_;
     my $raw;
+    my $started_at = time;
 
     eval {
         if ($self->{transport}) {
@@ -173,24 +182,29 @@ sub _request_once {
         1;
     } or do {
         my $cause = $@;
-        return (undef, $cause) if blessed($cause) && $cause->isa('HTTP::API::Client::Error');
+        return (undef, $cause, time - $started_at) if blessed($cause) && $cause->isa('HTTP::API::Client::Error');
+        my $elapsed = time - $started_at;
         return (undef, HTTP::API::Client::Error->new(
             category  => 'transport',
             method    => $method,
             url       => $url,
             retryable => 1,
+            elapsed   => $elapsed,
             message   => "HTTP transport failed: $cause",
-        ));
+        ), $elapsed);
     };
 
     if (ref($raw) ne 'HASH' || !exists $raw->{status}) {
+        my $elapsed = time - $started_at;
         return (undef, HTTP::API::Client::Error->new(
             category => 'transport', method => $method, url => $url,
             retryable => 1,
+            elapsed => $elapsed,
             message => 'HTTP transport returned an invalid response',
-        ));
+        ), $elapsed);
     }
 
+    my $elapsed = time - $started_at;
     my $response = HTTP::API::Client::Response->new(
         status  => 0 + $raw->{status},
         reason  => $raw->{reason},
@@ -198,9 +212,10 @@ sub _request_once {
         content => defined($raw->{content}) ? $raw->{content} : '',
         method  => $method,
         url     => $url,
+        elapsed => $elapsed,
     );
 
-    return ($response, undef) if $response->is_success;
+    return ($response, undef, $elapsed) if $response->is_success;
 
     my $rate_limit = $response->rate_limit;
     my $rate_limited = ($response->status == 403 || $response->status == 429)
@@ -213,10 +228,11 @@ sub _request_once {
         url         => $url,
         retryable   => _retryable_status($response->status) || $rate_limited,
         retry_after => $response->header('retry-after'),
-        request_id  => _request_id($response),
+        request_id  => $response->request_id,
+        elapsed     => $elapsed,
         response    => $response,
         message     => sprintf('HTTP %d%s', $response->status, defined($response->reason) && length($response->reason) ? ' ' . $response->reason : ''),
-    ));
+    ), $elapsed);
 }
 
 sub _normalize_hooks {
@@ -398,15 +414,6 @@ sub _retryable_status {
     return 0;
 }
 
-sub _request_id {
-    my ($response) = @_;
-    for my $name (qw(x-request-id request-id x-correlation-id)) {
-        my $value = $response->header($name);
-        return $value if defined $value && length $value;
-    }
-    return undef;
-}
-
 1;
 
 __END__
@@ -438,117 +445,61 @@ HTTP::API::Client - Small foundation for JSON HTTP API clients
   );
 
   my $response = $api->get('/users');
-  my $users = $response->json;
-  my $rate = $response->rate_limit;
-
-  my $pager = $api->paginate(
-      '/users',
-      mode  => 'cursor',
-      items => 'data.users',
-      next  => 'meta.next_cursor',
-  );
-
-  while (my $user = $pager->next) {
-      ...
-  }
+  my $data = $response->json;
 
 =head1 DESCRIPTION
 
-HTTP::API::Client is a deliberately small base layer for building HTTP API
-clients. It provides base URL handling, default headers, JSON request/response
-helpers, timeout configuration, structured errors, conservative retries,
-pagination helpers, normalized rate-limit metadata, and lifecycle hooks.
-
-Retry is enabled by default for GET, HEAD, PUT, DELETE, and OPTIONS. POST and
-PATCH are not retried automatically. Retryable failures include transport
-errors, HTTP 408, 425, 429, 5xx responses, and 403 responses that explicitly
-report an exhausted rate limit.
-
-=head1 METHODS
-
-=head2 new
-
-  my $api = HTTP::API::Client->new(
-      base_url => 'https://api.example.com',
-      headers  => { ... },
-      timeout  => 10,
-      retry    => { attempts => 3 },
-      hooks    => { ... },
-  );
-
-C<base_url> is required. C<headers>, C<timeout>, C<retry>, and C<hooks> are
-optional. Retry defaults to three attempts with exponential backoff and jitter.
-
-=head2 get, post, put, patch, delete
-
-Convenience methods around C<request>.
-
-=head2 paginate
-
-  my $pager = $api->paginate(
-      '/users',
-      mode  => 'next_url',
-      items => 'data.items',
-      next  => 'links.next',
-  );
-
-Returns an L<HTTP::API::Client::Pagination> iterator. Supported modes are
-C<next_url>, C<page>, and C<cursor>.
-
-=head2 request
-
-  my $response = $api->request('POST', '/items', json => { ... });
-
-Pass C<json> to encode a Perl value as JSON, or C<content> to send raw content.
-Pass C<query> as a hash reference to append percent-encoded query parameters.
-Array-reference values produce repeated keys and undefined values are omitted.
-Per-request C<headers> override default headers. Pass C<retry =E<gt> 0> to
-disable retry for one request, or a retry hash to override the policy. A
-C<hooks> hash can add request-local hooks after client-level hooks.
-
-Non-2xx responses throw L<HTTP::API::Client::Error> after retry is exhausted.
-Successful responses expose normalized rate-limit metadata through
-C<$response-E<gt>rate_limit>.
-
-=head1 HOOKS
-
-Hooks may be configured on the client or per request. Supported hook names are
-C<before_request>, C<after_response>, and C<on_error>. Each value may be a
-coderef or an arrayref of coderefs.
-
-C<before_request> receives a mutable request context hash containing C<method>,
-C<url>, C<headers>, C<content>, and C<attempt>. It runs immediately before each
-transport attempt. C<after_response> receives the successful response object
-and request context. C<on_error> receives the structured error and request
-context before retry is considered.
-
-Request-local hooks run after client-level hooks. Hook failures are wrapped as
-non-retryable C<hook> errors.
+HTTP::API::Client is a small layer for building HTTP API clients. It provides
+base URL handling, default headers, JSON request/response helpers, timeout
+configuration, structured errors, conservative automatic retries, pagination
+helpers, normalized rate-limit metadata, and request observability.
 
 =head1 RETRY POLICY
 
-The retry hash accepts C<attempts>, C<base_delay>, C<max_delay>, C<jitter>, and
-C<methods>. Exponential backoff is capped by C<max_delay>. A numeric
-C<Retry-After> response header takes precedence over the calculated delay.
-When a 403 or 429 response reports an exhausted quota, C<RateLimit-Reset> or
-C<X-RateLimit-Reset> is used as a fallback delay when available.
+Retries default to three total attempts for GET, HEAD, PUT, DELETE, and OPTIONS.
+POST and PATCH are intentionally excluded because blindly repeating them can
+produce duplicate side effects. Transport failures, HTTP 408, 425, 429, 5xx,
+and exhausted-quota 403 responses are retryable by default.
+
+A numeric Retry-After header wins over the calculated delay. Exhausted quota
+reset metadata is used as a fallback. Otherwise delays use exponential backoff
+with optional jitter and a configurable maximum.
+
+Pass C<retry =E<gt> 0> to disable retries for one request, or pass a retry hash
+to override the policy. To retry POST or PATCH, explicitly include it in the
+C<methods> list.
+
+=head1 PAGINATION
+
+C<paginate> returns an HTTP::API::Client::Pagination iterator. The supported
+modes are C<next_url>, C<page>, and C<cursor>. Each uses C<next> to return one
+item at a time and C<all> to collect all items.
+
+Extractor options may be dotted paths such as C<data.items> or coderefs.
+Repeated continuation values are rejected to avoid accidental infinite loops.
 
 =head1 RATE LIMITS
 
-L<HTTP::API::Client::RateLimit> normalizes C<RateLimit-*>, C<X-RateLimit-*>,
-and C<Retry-After> response headers. It exposes C<limit>, C<remaining>,
-C<used>, C<resource>, reset metadata, C<exhausted>, and C<wait_seconds>.
+Responses provide C<rate_limit>, returning an HTTP::API::Client::RateLimit
+object. Numeric C<RateLimit-Limit>, C<RateLimit-Remaining>, C<RateLimit-Reset>,
+C<X-RateLimit-Limit>, C<X-RateLimit-Remaining>, C<X-RateLimit-Used>,
+C<X-RateLimit-Reset>, C<X-RateLimit-Resource>, and C<Retry-After> fields are
+normalized when present.
 
-=head1 ERROR HANDLING
+C<X-RateLimit-Reset> is interpreted as a UTC epoch timestamp. C<RateLimit-Reset>
+is interpreted as seconds until reset. HTTP errors expose the same object via
+C<rate_limit>.
 
-Errors expose stable fields such as C<category>, C<status>, C<method>, C<url>,
-C<retryable>, C<retry_after>, C<request_id>, and C<rate_limit>. Hook failures
-use the C<hook> category and are not retryable. Exact error message wording is
-not intended as a machine-readable API.
+=head1 HOOKS
 
-=head1 LICENSE
+The constructor and individual requests accept a C<hooks> hash with
+C<before_request>, C<after_response>, and C<on_error> callbacks. Each value may
+be a coderef or an arrayref of coderefs. Request-local callbacks run after
+client-level callbacks.
 
-This library is free software; you may redistribute it and/or modify it under
-the same terms as Perl itself.
+C<before_request> receives a mutable request context and runs before every
+transport attempt. C<after_response> receives the successful response and
+context. C<on_error> receives the error and context before retry is considered.
+Hook failures are wrapped as structured, non-retryable C<hook> errors.
 
 =cut
