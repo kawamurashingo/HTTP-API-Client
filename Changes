@@ -1,5 +1,11 @@
 Revision history for HTTP-API-Client
 
+0.05  2026-08-16
+    - Add client-level and per-request lifecycle hooks.
+    - Add before_request, after_response, and on_error hooks.
+    - Allow before_request hooks to modify the outgoing request context.
+    - Wrap hook failures as structured non-retryable hook errors.
+
 0.04  2026-08-16
     - Add normalized rate-limit metadata on responses and errors.
     - Parse RateLimit-* and X-RateLimit-* quota headers.
