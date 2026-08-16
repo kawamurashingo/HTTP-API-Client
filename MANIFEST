@@ -13,6 +13,7 @@ t/00-load.t
 t/auth-helpers.t
 t/client.t
 t/hooks.t
+t/observability.t
 t/pagination.t
 t/query.t
 t/rate-limit.t
