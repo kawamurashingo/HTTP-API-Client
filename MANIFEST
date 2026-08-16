@@ -1,0 +1,7 @@
+Changes
+Makefile.PL
+MANIFEST
+README.md
+lib/HTTP/API/Client.pm
+t/00-load.t
+t/client.t
