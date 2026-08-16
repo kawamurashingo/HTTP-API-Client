@@ -23,6 +23,27 @@ sub status  { $_[0]->{status} }
 sub reason  { $_[0]->{reason} }
 sub headers { +{ %{ $_[0]->{headers} } } }
 sub content { $_[0]->{content} }
+sub text    { $_[0]->{content} }
+sub has_content { length($_[0]->{content}) ? 1 : 0 }
+
+sub content_type {
+    my ($self) = @_;
+    my $value = $self->header('content-type');
+    return undef if !defined $value || $value eq '';
+    $value =~ s/\s*;.*\z//;
+    $value =~ s/^\s+|\s+$//g;
+    return lc $value;
+}
+
+sub is_json {
+    my ($self) = @_;
+    my $type = $self->content_type;
+    return 0 if !defined $type;
+    return 1 if $type eq 'application/json';
+    return 1 if $type =~ m{\Aapplication/[a-z0-9.!#\$&^_+\-]+\+json\z}i;
+    return 0;
+}
+
 sub method  { $_[0]->{method} }
 sub elapsed { $_[0]->{elapsed} }
 sub request_id {
@@ -40,6 +61,8 @@ sub rate_limit { HTTP::API::Client::RateLimit->from_headers($_[0]->{headers}) }
 
 sub json {
     my ($self) = @_;
+    return undef if $self->{content} !~ /\S/;
+
     my $decoded = eval { decode_json($self->{content}) };
     if ($@) {
         die HTTP::API::Client::Error->new(
@@ -55,3 +78,59 @@ sub json {
 }
 
 1;
+
+__END__
+
+=head1 NAME
+
+HTTP::API::Client::Response - HTTP API response object
+
+=head1 RESPONSE BODY
+
+=head2 content
+
+Returns the raw response body exactly as supplied by the transport.
+
+=head2 text
+
+An alias for C<content>. No charset transcoding is performed.
+
+=head2 has_content
+
+Returns true when the raw response body has non-zero length.
+
+=head2 json
+
+Decodes the response body as JSON. An empty or whitespace-only body returns
+C<undef>. JSON decoding is explicit: C<json> attempts to decode regardless of
+the response Content-Type header, and throws a structured C<decode> error when
+non-empty content is not valid JSON.
+
+=head1 CONTENT TYPE
+
+=head2 content_type
+
+Returns the lower-cased media type from C<Content-Type>, excluding parameters
+such as C<charset>. Returns C<undef> when the header is absent.
+
+=head2 is_json
+
+Returns true for C<application/json> and structured syntax suffix media types
+ending in C<+json>, such as C<application/problem+json>.
+
+=head1 METADATA
+
+=head2 status, reason, headers, header, method, url
+
+Provide response status and request metadata. C<headers> returns a copy.
+
+=head2 elapsed
+
+Returns transport elapsed time when available.
+
+=head2 request_id
+
+Returns the first non-empty C<X-Request-Id>, C<Request-Id>, or
+C<X-Correlation-Id> value.
+
+=cut
