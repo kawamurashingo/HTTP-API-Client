@@ -11,7 +11,7 @@ use HTTP::API::Client::Response;
 use HTTP::API::Client::Error;
 use HTTP::API::Client::Pagination;
 
-our $VERSION = '0.10';
+our $VERSION = '0.11';
 
 sub new {
     my ($class, %args) = @_;
@@ -80,6 +80,26 @@ sub request {
     $url = _append_query($url, $query);
 
     my %headers = (%{ $self->{headers} }, %{ delete($opts{headers}) || {} });
+
+    if (exists $opts{idempotency}) {
+        my $idempotency = delete $opts{idempotency};
+        die "idempotency must be a hash reference\n" if ref($idempotency) ne 'HASH';
+
+        my %copy = %$idempotency;
+        my $key = delete $copy{key};
+        my $header = delete $copy{header};
+
+        die "idempotency key must be a non-empty scalar\n"
+            if !defined($key) || ref($key) || $key eq '';
+        die "idempotency header must be a non-empty scalar\n"
+            if !defined($header) || ref($header) || $header eq '';
+        die "unknown idempotency option: $_\n" for sort keys %copy;
+
+        my $wanted = lc $header;
+        my $already = grep { lc($_) eq $wanted } keys %headers;
+        $headers{$header} = "$key" if !$already;
+    }
+
     my $content;
 
     if (exists $opts{json}) {
@@ -552,6 +572,13 @@ Errors expose stable fields such as C<category>, C<status>, C<method>, C<url>,
 C<retryable>, C<retry_after>, C<request_id>, and C<rate_limit>. Hook failures
 use the C<hook> category and are not retryable. Exact error message wording is
 not intended as a machine-readable API.
+
+=head1 IDEMPOTENCY
+
+Pass C<idempotency =E<gt> { key =E<gt> ..., header =E<gt> ... }> to add an
+API-specific idempotency-key header to a request. The core deliberately does not
+assume a universal header name. An explicitly supplied request header with the
+same case-insensitive name takes precedence.
 
 =head1 LICENSE
 

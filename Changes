@@ -1,5 +1,12 @@
 Revision history for HTTP-API-Client
 
+0.11  2026-08-16
+    - Add transport-independent idempotency-key support.
+    - Accept per-request idempotency key and header name configuration.
+    - Preserve explicitly supplied request headers instead of overwriting them.
+    - Keep service-specific idempotency header naming outside the core.
+    - Add validation, documentation, and regression tests.
+
 0.10  2026-08-16
     - Stabilize the structured error model and document public error categories.
     - Define encode, decode, transport, http, and hook as machine-readable categories.

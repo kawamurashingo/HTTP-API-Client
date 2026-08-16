@@ -4,6 +4,7 @@ MANIFEST
 README.md
 docs/AUTHENTICATION.md
 docs/ERRORS.md
+docs/IDEMPOTENCY.md
 docs/RESPONSE.md
 lib/HTTP/API/Client.pm
 lib/HTTP/API/Client/Auth.pm
@@ -16,6 +17,7 @@ t/auth-helpers.t
 t/client.t
 t/error-model.t
 t/hooks.t
+t/idempotency.t
 t/observability.t
 t/pagination.t
 t/query.t
