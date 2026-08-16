@@ -11,7 +11,7 @@ use HTTP::API::Client::Response;
 use HTTP::API::Client::Error;
 use HTTP::API::Client::Pagination;
 
-our $VERSION = '0.09';
+our $VERSION = '0.10';
 
 sub new {
     my ($class, %args) = @_;
@@ -385,22 +385,15 @@ sub _append_query {
     }
 
     my $separator = index($url, '?') >= 0 ? '&' : '?';
-    $separator = '' if $url =~ /[?&]\z/;
     return $url . $separator . join('&', @pairs) . $fragment;
 }
 
 sub _uri_escape {
     my ($value) = @_;
-    my $bytes = encode('UTF-8', "$value");
+    my $bytes = defined($value) ? "$value" : '';
+    utf8::encode($bytes) if utf8::is_utf8($bytes);
     $bytes =~ s/([^A-Za-z0-9\-._~])/sprintf('%%%02X', ord($1))/ge;
     return $bytes;
-}
-
-sub _retryable_status {
-    my ($status) = @_;
-    return 1 if $status == 408 || $status == 425 || $status == 429;
-    return 1 if $status >= 500 && $status <= 599;
-    return 0;
 }
 
 sub _non_negative_number {
@@ -410,8 +403,15 @@ sub _non_negative_number {
 
 sub _join_url {
     my ($self, $path) = @_;
-    return $self->{base_url} if $path eq '';
-    return $self->{base_url} . ($path =~ m{\A/} ? $path : "/$path");
+    $path =~ s{\A/+}{};
+    return $self->{base_url} . '/' . $path;
+}
+
+sub _retryable_status {
+    my ($status) = @_;
+    return 1 if $status == 408 || $status == 425 || $status == 429;
+    return 1 if $status >= 500 && $status <= 599;
+    return 0;
 }
 
 1;
@@ -420,70 +420,142 @@ __END__
 
 =head1 NAME
 
-HTTP::API::Client - Small foundation for HTTP JSON API clients
+HTTP::API::Client - Small foundation for JSON HTTP API clients
 
 =head1 SYNOPSIS
 
-    use HTTP::API::Client;
+  use HTTP::API::Client;
 
-    my $api = HTTP::API::Client->new(
-        base_url => 'https://api.example.com',
-        headers  => { authorization => 'Bearer token' },
-        timeout  => 5,
-        retry    => { attempts => 3 },
-    );
+  my $api = HTTP::API::Client->new(
+      base_url => 'https://api.example.com',
+      headers  => { Authorization => "Bearer $token" },
+      timeout  => 10,
+      retry    => {
+          attempts   => 3,
+          base_delay => 0.25,
+          max_delay  => 5,
+          jitter     => 1,
+      },
+      hooks => {
+          before_request => sub {
+              my ($ctx) = @_;
+              $ctx->{headers}{'X-Trace-Id'} = make_trace_id();
+          },
+      },
+  );
 
-    my $response = $api->get('/users/42');
-    my $user = $response->json;
+  my $response = $api->get('/users');
+  my $users = $response->json;
+  my $rate = $response->rate_limit;
+
+  my $pager = $api->paginate(
+      '/users',
+      mode  => 'cursor',
+      items => 'data.users',
+      next  => 'meta.next_cursor',
+  );
+
+  while (my $user = $pager->next) {
+      ...
+  }
 
 =head1 DESCRIPTION
 
-HTTP::API::Client is a small foundation for building HTTP JSON API clients. It
-provides base URL handling, default headers, JSON request/response helpers,
-timeout configuration, structured errors, conservative retries,
-pagination helpers, normalized rate-limit metadata, and request observability.
+HTTP::API::Client is a deliberately small base layer for building HTTP API
+clients. It provides base URL handling, default headers, JSON request/response
+helpers, timeout configuration, structured errors, conservative retries,
+pagination helpers, normalized rate-limit metadata, and lifecycle hooks.
 
-=head1 RETRIES
+Retry is enabled by default for GET, HEAD, PUT, DELETE, and OPTIONS. POST and
+PATCH are not retried automatically. Retryable failures include transport
+errors, HTTP 408, 425, 429, 5xx responses, and 403 responses that explicitly
+report an exhausted rate limit.
 
-Retries are enabled for GET, HEAD, PUT, DELETE, and OPTIONS by default. POST and
-PATCH are not retried unless explicitly added to the retry C<methods> list.
-Retryable failures include transport errors, HTTP 408, 425, 429, 5xx, and
-exhausted-quota 403 responses. Numeric C<Retry-After> values take precedence;
-rate-limit reset metadata is used as a fallback before exponential backoff.
+=head1 METHODS
 
-=head1 PAGINATION
+=head2 new
 
-Use C<paginate> to create a lazy iterator. The iterator supports C<next_url>,
-C<page>, and C<cursor> modes with dotted-path or coderef extractors.
+  my $api = HTTP::API::Client->new(
+      base_url => 'https://api.example.com',
+      headers  => { ... },
+      timeout  => 10,
+      retry    => { attempts => 3 },
+      hooks    => { ... },
+  );
 
-=head1 RATE LIMITS
+C<base_url> is required. C<headers>, C<timeout>, C<retry>, and C<hooks> are
+optional. Retry defaults to three attempts with exponential backoff and jitter.
 
-Responses and HTTP errors expose normalized rate-limit metadata via
-C<rate_limit>. Numeric C<Retry-After> values are preferred for retry delays,
-with rate-limit reset metadata used as a fallback for exhausted quotas.
+=head2 get, post, put, patch, delete
+
+Convenience methods around C<request>.
+
+=head2 paginate
+
+  my $pager = $api->paginate(
+      '/users',
+      mode  => 'next_url',
+      items => 'data.items',
+      next  => 'links.next',
+  );
+
+Returns an L<HTTP::API::Client::Pagination> iterator. Supported modes are
+C<next_url>, C<page>, and C<cursor>.
+
+=head2 request
+
+  my $response = $api->request('POST', '/items', json => { ... });
+
+Pass C<json> to encode a Perl value as JSON, or C<content> to send raw content.
+Pass C<query> as a hash reference to append percent-encoded query parameters.
+Array-reference values produce repeated keys and undefined values are omitted.
+Per-request C<headers> override default headers. Pass C<retry =E<gt> 0> to
+disable retry for one request, or a retry hash to override the policy. A
+C<hooks> hash can add request-local hooks after client-level hooks.
+
+Non-2xx responses throw L<HTTP::API::Client::Error> after retry is exhausted.
+Successful responses expose normalized rate-limit metadata through
+C<$response-E<gt>rate_limit>.
 
 =head1 HOOKS
 
-Lifecycle hooks can be configured with C<hooks> at construction time or per
-request. Supported hooks are C<before_request>, C<after_response>, and
-C<on_error>. Client-level hooks run before per-request hooks. Hooks run once per
-attempt, including retries. C<before_request> receives a mutable request context;
-C<after_response> receives the response and context; C<on_error> receives the
-error and context. Hook failures are wrapped as non-retryable C<hook> errors.
+Hooks may be configured on the client or per request. Supported hook names are
+C<before_request>, C<after_response>, and C<on_error>. Each value may be a
+coderef or an arrayref of coderefs.
 
-=head1 OBSERVABILITY
+C<before_request> receives a mutable request context hash containing C<method>,
+C<url>, C<headers>, C<content>, and C<attempt>. It runs immediately before each
+transport attempt. C<after_response> receives the successful response object
+and request context. C<on_error> receives the structured error and request
+context before retry is considered.
 
-Responses expose C<elapsed> transport time and C<request_id>. Lifecycle hook
-contexts receive C<started_at>, C<elapsed>, and C<request_id> for each attempt.
-The core deliberately does not select a logging, metrics, tracing, or telemetry
-backend.
+Request-local hooks run after client-level hooks. Hook failures are wrapped as
+non-retryable C<hook> errors.
 
-=head1 QUERY PARAMETERS
+=head1 RETRY POLICY
 
-Pass C<query =E<gt> \%params> to any request method. Scalar values produce one
-key/value pair, array references produce repeated keys, and undefined values are
-omitted. Existing query strings and URL fragments are preserved.
+The retry hash accepts C<attempts>, C<base_delay>, C<max_delay>, C<jitter>, and
+C<methods>. Exponential backoff is capped by C<max_delay>. A numeric
+C<Retry-After> response header takes precedence over the calculated delay.
+When a 403 or 429 response reports an exhausted quota, C<RateLimit-Reset> or
+C<X-RateLimit-Reset> is used as a fallback delay when available.
+
+=head1 RATE LIMITS
+
+L<HTTP::API::Client::RateLimit> normalizes C<RateLimit-*>, C<X-RateLimit-*>,
+and C<Retry-After> response headers. It exposes C<limit>, C<remaining>,
+C<used>, C<resource>, reset metadata, C<exhausted>, and C<wait_seconds>.
+
+=head1 ERROR HANDLING
+
+Errors expose stable fields such as C<category>, C<status>, C<method>, C<url>,
+C<retryable>, C<retry_after>, C<request_id>, and C<rate_limit>. Hook failures
+use the C<hook> category and are not retryable. Exact error message wording is
+not intended as a machine-readable API.
 
 =head1 LICENSE
 
-Same terms as Perl itself.
+This library is free software; you may redistribute it and/or modify it under
+the same terms as Perl itself.
+
+=cut
