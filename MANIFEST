@@ -2,6 +2,7 @@ Changes
 Makefile.PL
 MANIFEST
 README.md
+docs/AUTHENTICATION.md
 lib/HTTP/API/Client.pm
 lib/HTTP/API/Client/Auth.pm
 lib/HTTP/API/Client/Error.pm
