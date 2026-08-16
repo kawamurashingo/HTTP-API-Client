@@ -2,7 +2,7 @@
 
 A small, dependency-light foundation for building JSON HTTP API clients in Perl.
 
-The goal is not to replace `HTTP::Tiny`, `LWP`, or `Mojo::UserAgent`. It adds the API-client layer applications repeatedly rebuild: base URLs, JSON request/response handling, default headers, timeout configuration, structured errors, conservative retries, and pagination.
+The goal is not to replace `HTTP::Tiny`, `LWP`, or `Mojo::UserAgent`. It adds the API-client layer applications repeatedly rebuild: base URLs, JSON request/response handling, default headers, timeout configuration, structured errors, conservative retries, pagination, and rate-limit handling.
 
 ## Basic usage
 
@@ -26,6 +26,26 @@ my $api = HTTP::API::Client->new(
 my $response = $api->get('/users');
 my $data = $response->json;
 ```
+
+## Rate limits
+
+Responses expose normalized rate-limit metadata:
+
+```perl
+my $response = $api->get('/users');
+my $rate = $response->rate_limit;
+
+say $rate->limit       if defined $rate->limit;
+say $rate->remaining   if defined $rate->remaining;
+say $rate->resource    if defined $rate->resource;
+say $rate->wait_seconds if $rate->exhausted;
+```
+
+`HTTP::API::Client::RateLimit` understands numeric `RateLimit-Limit`, `RateLimit-Remaining`, and `RateLimit-Reset` fields as well as the widely-used `X-RateLimit-*` family and `Retry-After`. `X-RateLimit-Reset` is treated as a UTC epoch timestamp; `RateLimit-Reset` is treated as a delay in seconds.
+
+HTTP errors expose the same object through `$error->rate_limit`.
+
+For exhausted quotas, `Retry-After` remains the first choice. When it is absent, retry handling can fall back to reset metadata. A `403` is only treated as a rate-limit retry when the response explicitly reports `remaining == 0`; ordinary authorization failures are not retried.
 
 ## Pagination
 
@@ -85,7 +105,7 @@ Repeated next URLs/cursors are detected and rejected rather than looping forever
 
 Retries are intentionally conservative. By default only `GET`, `HEAD`, `PUT`, `DELETE`, and `OPTIONS` are retried. `POST` and `PATCH` are not automatically repeated because doing so can duplicate side effects.
 
-Retryable failures include transport errors, HTTP `408`, `425`, `429`, and `5xx` responses. Delays use exponential backoff with jitter. A numeric `Retry-After` header takes precedence over the calculated delay.
+Retryable failures include transport errors, HTTP `408`, `425`, `429`, `5xx`, and exhausted-quota `403` responses. Delays use exponential backoff with jitter. A numeric `Retry-After` header takes precedence; exhausted rate-limit reset metadata is used as a fallback.
 
 ```perl
 $api->get('/status', retry => 0);
@@ -106,14 +126,15 @@ $api->post('/jobs',
 - JSON request encoding and response decoding
 - configurable timeout
 - structured transport/HTTP/encode/decode errors
-- request ID and `Retry-After` extraction
+- request ID extraction
 - automatic retry with exponential backoff + jitter
+- normalized rate-limit metadata and reset-aware retry fallback
 - next-URL, page-number, and cursor pagination
 - injectable transport for tests and custom integration
 
 ## Planned
 
-Richer rate-limit policy and middleware/hooks.
+Middleware/hooks and additional API-client ergonomics.
 
 ## License
 
