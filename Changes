@@ -1,5 +1,12 @@
 Revision history for HTTP-API-Client
 
+0.12  2026-08-16
+    - Formalize the transport adapter contract.
+    - Support transport objects with a request() method in addition to code references.
+    - Document request arguments, response shape, and transport failure behavior.
+    - Preserve the existing code-reference transport API for backward compatibility.
+    - Add adapter-contract regression tests and an example transport object.
+
 0.11  2026-08-16
     - Add transport-independent idempotency-key support.
     - Accept per-request idempotency key and header name configuration.
