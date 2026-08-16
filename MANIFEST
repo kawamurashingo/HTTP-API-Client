@@ -6,6 +6,7 @@ docs/AUTHENTICATION.md
 docs/ERRORS.md
 docs/IDEMPOTENCY.md
 docs/RESPONSE.md
+docs/TRANSPORT.md
 lib/HTTP/API/Client.pm
 lib/HTTP/API/Client/Auth.pm
 lib/HTTP/API/Client/Error.pm
@@ -24,3 +25,4 @@ t/query.t
 t/rate-limit.t
 t/response.t
 t/retry.t
+t/transport.t
