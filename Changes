@@ -7,9 +7,10 @@ Revision history for HTTP-API-Client
     - Detect repeated continuations to avoid infinite pagination loops.
 
 0.02  2026-08-16
-    - Add conservative automatic retries for idempotent methods.
-    - Add exponential backoff with jitter and Retry-After support.
-    - Split Response and Error into dedicated modules.
+    - Add conservative automatic retry support.
+    - Retry GET/HEAD/PUT/DELETE/OPTIONS by default, but not POST/PATCH.
+    - Add exponential backoff with jitter and numeric Retry-After support.
+    - Allow retry policy overrides per client and per request.
 
 0.01  2026-08-16
     - Initial release.
