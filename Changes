@@ -1,10 +1,15 @@
 Revision history for HTTP-API-Client
 
+0.03  2026-08-16
+    - Add a common pagination iterator API.
+    - Support next-URL, page-number, and cursor pagination modes.
+    - Support dotted-path or coderef extractors for items and continuation values.
+    - Detect repeated continuations to avoid infinite pagination loops.
+
 0.02  2026-08-16
-    - Add conservative automatic retry support.
-    - Retry GET/HEAD/PUT/DELETE/OPTIONS by default, but not POST/PATCH.
-    - Add exponential backoff with jitter and numeric Retry-After support.
-    - Allow retry policy overrides per client and per request.
+    - Add conservative automatic retries for idempotent methods.
+    - Add exponential backoff with jitter and Retry-After support.
+    - Split Response and Error into dedicated modules.
 
 0.01  2026-08-16
     - Initial release.
