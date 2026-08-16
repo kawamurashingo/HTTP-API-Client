@@ -11,7 +11,7 @@ use HTTP::API::Client::Response;
 use HTTP::API::Client::Error;
 use HTTP::API::Client::Pagination;
 
-our $VERSION = '0.11';
+our $VERSION = '0.12';
 
 sub new {
     my ($class, %args) = @_;
@@ -27,7 +27,10 @@ sub new {
     die "timeout must be a positive number\n" if !defined($timeout) || $timeout !~ /\A(?:\d+(?:\.\d*)?|\.\d+)\z/ || $timeout <= 0;
 
     my $transport = delete $args{transport};
-    die "transport must be a code reference\n" if defined($transport) && ref($transport) ne 'CODE';
+    die "transport must be a code reference or object with request()\n"
+        if defined($transport)
+        && ref($transport) ne 'CODE'
+        && !(blessed($transport) && $transport->can('request'));
 
     my $retry = exists $args{retry} ? delete($args{retry}) : {};
     die "retry must be a hash reference\n" if ref($retry) ne 'HASH';
@@ -188,10 +191,17 @@ sub _request_once {
 
     eval {
         if ($self->{transport}) {
-            $raw = $self->{transport}->($method, $url, {
+            my $request_opts = {
                 headers => $headers,
                 (defined($content) ? (content => $content) : ()),
-            });
+            };
+
+            if (ref($self->{transport}) eq 'CODE') {
+                $raw = $self->{transport}->($method, $url, $request_opts);
+            }
+            else {
+                $raw = $self->{transport}->request($method, $url, $request_opts);
+            }
         }
         else {
             $raw = $self->{http}->request($method, $url, {
@@ -572,6 +582,15 @@ Errors expose stable fields such as C<category>, C<status>, C<method>, C<url>,
 C<retryable>, C<retry_after>, C<request_id>, and C<rate_limit>. Hook failures
 use the C<hook> category and are not retryable. Exact error message wording is
 not intended as a machine-readable API.
+
+=head1 TRANSPORT CONTRACT
+
+The C<transport> constructor option accepts either a code reference or an object
+with a C<request> method. Both are called as
+C<request($method, $url, \%options)> and must return a hash reference containing
+at least C<status>, with optional C<reason>, C<headers>, and C<content> fields.
+Transport exceptions and invalid return values are normalized into structured
+C<transport> errors. See C<docs/TRANSPORT.md> for the extension contract.
 
 =head1 IDEMPOTENCY
 
