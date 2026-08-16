@@ -11,7 +11,7 @@ use HTTP::API::Client::Response;
 use HTTP::API::Client::Error;
 use HTTP::API::Client::Pagination;
 
-our $VERSION = '0.03';
+our $VERSION = '0.04';
 
 sub new {
     my ($class, %args) = @_;
@@ -114,7 +114,7 @@ sub request {
 
         die $error if $attempt >= $attempts || !$error->retryable;
 
-        my $delay = _retry_delay($retry, $attempt, $error->retry_after);
+        my $delay = _retry_delay($retry, $attempt, $error);
         sleep($delay) if $delay > 0;
     }
 
@@ -170,12 +170,16 @@ sub _request_once {
 
     return ($response, undef) if $response->is_success;
 
+    my $rate_limit = $response->rate_limit;
+    my $rate_limited = ($response->status == 403 || $response->status == 429)
+        && $rate_limit->exhausted;
+
     return (undef, HTTP::API::Client::Error->new(
         category    => 'http',
         status      => $response->status,
         method      => $method,
         url         => $url,
-        retryable   => _retryable_status($response->status),
+        retryable   => _retryable_status($response->status) || $rate_limited,
         retry_after => $response->header('retry-after'),
         request_id  => _request_id($response),
         response    => $response,
@@ -222,10 +226,17 @@ sub _method_is_retryable {
 }
 
 sub _retry_delay {
-    my ($retry, $attempt, $retry_after) = @_;
+    my ($retry, $attempt, $error) = @_;
 
+    my $retry_after = $error->retry_after;
     if (defined($retry_after) && $retry_after =~ /\A(?:\d+(?:\.\d*)?|\.\d+)\z/) {
         return 0 + $retry_after;
+    }
+
+    my $rate_limit = $error->rate_limit;
+    if ($rate_limit && $rate_limit->exhausted) {
+        my $wait = $rate_limit->wait_seconds;
+        return $wait if defined $wait;
     }
 
     my $delay = $retry->{base_delay} * (2 ** ($attempt - 1));
@@ -287,6 +298,7 @@ HTTP::API::Client - Small foundation for JSON HTTP API clients
 
   my $response = $api->get('/users');
   my $users = $response->json;
+  my $rate = $response->rate_limit;
 
   my $pager = $api->paginate(
       '/users',
@@ -303,12 +315,13 @@ HTTP::API::Client - Small foundation for JSON HTTP API clients
 
 HTTP::API::Client is a deliberately small base layer for building HTTP API
 clients. It provides base URL handling, default headers, JSON request/response
-helpers, timeout configuration, structured errors, conservative retries, and
-pagination helpers.
+helpers, timeout configuration, structured errors, conservative retries,
+pagination helpers, and normalized rate-limit metadata.
 
 Retry is enabled by default for GET, HEAD, PUT, DELETE, and OPTIONS. POST and
 PATCH are not retried automatically. Retryable failures include transport
-errors, HTTP 408, 425, 429, and 5xx responses.
+errors, HTTP 408, 425, 429, 5xx responses, and 403 responses that explicitly
+report an exhausted rate limit.
 
 =head1 METHODS
 
@@ -349,18 +362,28 @@ Per-request C<headers> override default headers. Pass C<retry =E<gt> 0> to
 disable retry for one request, or a retry hash to override the policy.
 
 Non-2xx responses throw L<HTTP::API::Client::Error> after retry is exhausted.
+Successful responses expose normalized rate-limit metadata through
+C<$response-E<gt>rate_limit>.
 
 =head1 RETRY POLICY
 
 The retry hash accepts C<attempts>, C<base_delay>, C<max_delay>, C<jitter>, and
 C<methods>. Exponential backoff is capped by C<max_delay>. A numeric
 C<Retry-After> response header takes precedence over the calculated delay.
+When a 403 or 429 response reports an exhausted quota, C<RateLimit-Reset> or
+C<X-RateLimit-Reset> is used as a fallback delay when available.
+
+=head1 RATE LIMITS
+
+L<HTTP::API::Client::RateLimit> normalizes C<RateLimit-*>, C<X-RateLimit-*>,
+and C<Retry-After> response headers. It exposes C<limit>, C<remaining>,
+C<used>, C<resource>, reset metadata, C<exhausted>, and C<wait_seconds>.
 
 =head1 ERROR HANDLING
 
 Errors expose stable fields such as C<category>, C<status>, C<method>, C<url>,
-C<retryable>, C<retry_after>, and C<request_id>. Exact error message wording is
-not intended as a machine-readable API.
+C<retryable>, C<retry_after>, C<request_id>, and C<rate_limit>. Exact error
+message wording is not intended as a machine-readable API.
 
 =head1 LICENSE
 
