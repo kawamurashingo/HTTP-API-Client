@@ -1,5 +1,12 @@
 Revision history for HTTP-API-Client
 
+0.10  2026-08-16
+    - Stabilize the structured error model and document public error categories.
+    - Define encode, decode, transport, http, and hook as machine-readable categories.
+    - Add body, text, json, headers, and header accessors on error objects.
+    - Document response availability and stringification behavior.
+    - Add compatibility-focused regression tests for error semantics.
+
 0.09  2026-08-16
     - Add explicit response body and Content-Type helpers.
     - Add text, has_content, content_type, and is_json response methods.
