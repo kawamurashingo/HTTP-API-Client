@@ -3,31 +3,52 @@ package HTTP::API::Client;
 use strict;
 use warnings;
 use HTTP::Tiny;
-use JSON::PP qw(encode_json decode_json);
+use JSON::PP qw(encode_json);
 use Scalar::Util qw(blessed);
+use Time::HiRes qw(sleep);
 
-our $VERSION = '0.01';
+use HTTP::API::Client::Response;
+use HTTP::API::Client::Error;
+
+our $VERSION = '0.02';
 
 sub new {
     my ($class, %args) = @_;
 
-    die "base_url is required\n" unless defined $args{base_url} && length $args{base_url};
+    my $base_url = delete $args{base_url};
+    die "base_url is required\n" if !defined($base_url) || $base_url eq '';
+    $base_url =~ s{/+\z}{};
 
-    my $base_url = $args{base_url};
-    $base_url =~ s{/$}{};
+    my $headers = delete($args{headers}) || {};
+    die "headers must be a hash reference\n" if ref($headers) ne 'HASH';
+
+    my $timeout = exists $args{timeout} ? delete($args{timeout}) : 10;
+    die "timeout must be a positive number\n" if !defined($timeout) || $timeout !~ /\A(?:\d+(?:\.\d*)?|\.\d+)\z/ || $timeout <= 0;
+
+    my $transport = delete $args{transport};
+    die "transport must be a code reference\n" if defined($transport) && ref($transport) ne 'CODE';
+
+    my $retry = exists $args{retry} ? delete($args{retry}) : {};
+    die "retry must be a hash reference\n" if ref($retry) ne 'HASH';
+    $retry = _normalize_retry($retry);
+
+    die "unknown constructor option: $_\n" for sort keys %args;
 
     my $self = bless {
         base_url  => $base_url,
-        headers   => $args{headers} || {},
-        timeout   => defined $args{timeout} ? $args{timeout} : 30,
-        transport => $args{transport},
+        headers   => { %$headers },
+        timeout   => $timeout,
+        transport => $transport,
+        retry     => $retry,
     }, $class;
 
+    $self->{http} = HTTP::Tiny->new(timeout => $timeout) if !$transport;
     return $self;
 }
 
 sub base_url { $_[0]->{base_url} }
 sub timeout  { $_[0]->{timeout} }
+sub retry    { +{ %{ $_[0]->{retry} }, methods => [ @{ $_[0]->{retry}{methods} } ] } }
 
 sub get    { my ($self, $path, %opts) = @_; return $self->request('GET',    $path, %opts) }
 sub post   { my ($self, $path, %opts) = @_; return $self->request('POST',   $path, %opts) }
@@ -37,189 +58,197 @@ sub delete { my ($self, $path, %opts) = @_; return $self->request('DELETE', $pat
 
 sub request {
     my ($self, $method, $path, %opts) = @_;
+    $method = uc($method // '');
+    die "method is required\n" if $method eq '';
+    die "path is required\n" if !defined $path;
 
-    my $url = $path =~ m{^https?://} ? $path : $self->{base_url} . ($path =~ m{^/} ? '' : '/') . $path;
-    my %headers = (%{ $self->{headers} }, %{ $opts{headers} || {} });
+    my $url = $path =~ m{\Ahttps?://} ? $path : $self->_join_url($path);
 
+    my %headers = (%{ $self->{headers} }, %{ delete($opts{headers}) || {} });
     my $content;
+
     if (exists $opts{json}) {
-        eval { $content = encode_json($opts{json}); 1 } or do {
-            my $err = $@;
+        my $value = delete $opts{json};
+        $content = eval { encode_json($value) };
+        if ($@) {
             die HTTP::API::Client::Error->new(
                 category => 'encode',
-                message  => "JSON encode failure: $err",
                 method   => $method,
                 url      => $url,
-            );
-        };
-        $headers{'content-type'} ||= 'application/json';
-    }
-    elsif (exists $opts{content}) {
-        $content = $opts{content};
-    }
-
-    my $transport = $self->{transport};
-    my $raw;
-
-    if ($transport) {
-        my $call = ref($transport) eq 'CODE' ? $transport : $transport->can('request');
-        if (!$call) {
-            die HTTP::API::Client::Error->new(
-                category => 'transport',
-                message  => 'Invalid transport: expected coderef or object with request()',
-                method   => $method,
-                url      => $url,
+                message  => "failed to encode JSON request: $@",
             );
         }
-
-        eval {
-            if (ref($transport) eq 'CODE') {
-                $raw = $transport->($method, $url, { headers => \%headers, content => $content });
-            }
-            else {
-                $raw = $transport->request($method, $url, { headers => \%headers, content => $content });
-            }
-            1;
-        } or do {
-            my $err = $@;
-            die $err if blessed($err) && $err->isa('HTTP::API::Client::Error');
-            die HTTP::API::Client::Error->new(
-                category => 'transport',
-                message  => "Transport failure: $err",
-                method   => $method,
-                url      => $url,
-            );
-        };
+        $headers{'content-type'} ||= 'application/json';
+        $headers{'accept'}       ||= 'application/json';
     }
-    else {
-        my $http = HTTP::Tiny->new(timeout => $self->{timeout});
-        eval {
-            $raw = $http->request($method, $url, {
-                headers => \%headers,
-                (defined $content ? (content => $content) : ()),
+    elsif (exists $opts{content}) {
+        $content = delete $opts{content};
+    }
+
+    my $retry = exists $opts{retry} ? delete($opts{retry}) : $self->{retry};
+    if (ref($retry) eq 'HASH' && $retry != $self->{retry}) {
+        $retry = _normalize_retry($retry);
+    }
+    elsif (!ref($retry)) {
+        $retry = $retry ? $self->{retry} : _normalize_retry({ attempts => 1 });
+    }
+
+    die "unknown request option: $_\n" for sort keys %opts;
+
+    my $attempts = _method_is_retryable($method, $retry) ? $retry->{attempts} : 1;
+    my $attempt = 0;
+
+    while (++$attempt <= $attempts) {
+        my ($response, $error) = $self->_request_once($method, $url, \%headers, $content);
+        return $response if $response;
+
+        die $error if $attempt >= $attempts || !$error->retryable;
+
+        my $delay = _retry_delay($retry, $attempt, $error->retry_after);
+        sleep($delay) if $delay > 0;
+    }
+
+    die "unreachable retry state\n";
+}
+
+sub _request_once {
+    my ($self, $method, $url, $headers, $content) = @_;
+    my $raw;
+
+    eval {
+        if ($self->{transport}) {
+            $raw = $self->{transport}->($method, $url, {
+                headers => $headers,
+                (defined($content) ? (content => $content) : ()),
             });
-            1;
-        } or do {
-            my $err = $@;
-            die HTTP::API::Client::Error->new(
-                category => 'transport',
-                message  => "Transport failure: $err",
-                method   => $method,
-                url      => $url,
-            );
-        };
+        }
+        else {
+            $raw = $self->{http}->request($method, $url, {
+                headers => $headers,
+                (defined($content) ? (content => $content) : ()),
+            });
+        }
+        1;
+    } or do {
+        my $cause = $@;
+        return (undef, $cause) if blessed($cause) && $cause->isa('HTTP::API::Client::Error');
+        return (undef, HTTP::API::Client::Error->new(
+            category  => 'transport',
+            method    => $method,
+            url       => $url,
+            retryable => 1,
+            message   => "HTTP transport failed: $cause",
+        ));
+    };
+
+    if (ref($raw) ne 'HASH' || !exists $raw->{status}) {
+        return (undef, HTTP::API::Client::Error->new(
+            category => 'transport', method => $method, url => $url,
+            retryable => 1,
+            message => 'HTTP transport returned an invalid response',
+        ));
     }
 
     my $response = HTTP::API::Client::Response->new(
-        status  => $raw->{status},
+        status  => 0 + $raw->{status},
         reason  => $raw->{reason},
         headers => $raw->{headers} || {},
-        content => defined $raw->{content} ? $raw->{content} : '',
+        content => defined($raw->{content}) ? $raw->{content} : '',
         method  => $method,
         url     => $url,
     );
 
-    return $response if $response->is_success;
+    return ($response, undef) if $response->is_success;
 
-    my $request_id = $response->header('x-request-id')
-                  || $response->header('request-id')
-                  || $response->header('x-correlation-id');
-
-    die HTTP::API::Client::Error->new(
+    return (undef, HTTP::API::Client::Error->new(
         category    => 'http',
-        message     => sprintf('HTTP %s%s', $response->status // 'error', $response->reason ? ' ' . $response->reason : ''),
         status      => $response->status,
         method      => $method,
         url         => $url,
-        request_id  => $request_id,
+        retryable   => _retryable_status($response->status),
         retry_after => $response->header('retry-after'),
+        request_id  => _request_id($response),
         response    => $response,
-    );
+        message     => sprintf('HTTP %d%s', $response->status, defined($response->reason) && length($response->reason) ? ' ' . $response->reason : ''),
+    ));
 }
 
-package HTTP::API::Client::Response;
+sub _normalize_retry {
+    my ($retry) = @_;
+    my %copy = %$retry;
 
-use strict;
-use warnings;
-use JSON::PP qw(decode_json);
+    my $attempts = exists $copy{attempts} ? delete($copy{attempts}) : 3;
+    die "retry attempts must be a positive integer\n" if $attempts !~ /\A\d+\z/ || $attempts < 1;
 
-sub new {
-    my ($class, %args) = @_;
-    return bless \%args, $class;
+    my $base_delay = exists $copy{base_delay} ? delete($copy{base_delay}) : 0.25;
+    die "retry base_delay must be a non-negative number\n" if !_non_negative_number($base_delay);
+
+    my $max_delay = exists $copy{max_delay} ? delete($copy{max_delay}) : 5;
+    die "retry max_delay must be a non-negative number\n" if !_non_negative_number($max_delay);
+
+    my $jitter = exists $copy{jitter} ? delete($copy{jitter}) : 1;
+    $jitter = $jitter ? 1 : 0;
+
+    my $methods = exists $copy{methods} ? delete($copy{methods}) : [qw(GET HEAD PUT DELETE OPTIONS)];
+    die "retry methods must be an array reference\n" if ref($methods) ne 'ARRAY';
+    my @methods = map { uc($_ // '') } @$methods;
+    die "retry methods must not contain empty values\n" if grep { $_ eq '' } @methods;
+
+    die "unknown retry option: $_\n" for sort keys %copy;
+
+    return {
+        attempts   => 0 + $attempts,
+        base_delay => 0 + $base_delay,
+        max_delay  => 0 + $max_delay,
+        jitter     => $jitter,
+        methods    => \@methods,
+    };
 }
 
-sub status  { $_[0]->{status} }
-sub reason  { $_[0]->{reason} }
-sub headers { $_[0]->{headers} }
-sub content { $_[0]->{content} }
-sub method  { $_[0]->{method} }
-sub url     { $_[0]->{url} }
-
-sub is_success {
-    my ($self) = @_;
-    return defined($self->{status}) && $self->{status} >= 200 && $self->{status} < 300;
+sub _method_is_retryable {
+    my ($method, $retry) = @_;
+    my %allowed = map { $_ => 1 } @{ $retry->{methods} };
+    return $allowed{$method} ? 1 : 0;
 }
 
-sub header {
-    my ($self, $name) = @_;
-    my $headers = $self->{headers} || {};
-    my $needle = lc $name;
-    for my $key (keys %$headers) {
-        return $headers->{$key} if lc($key) eq $needle;
+sub _retry_delay {
+    my ($retry, $attempt, $retry_after) = @_;
+
+    if (defined($retry_after) && $retry_after =~ /\A(?:\d+(?:\.\d*)?|\.\d+)\z/) {
+        return 0 + $retry_after;
+    }
+
+    my $delay = $retry->{base_delay} * (2 ** ($attempt - 1));
+    $delay = $retry->{max_delay} if $delay > $retry->{max_delay};
+    $delay = rand($delay) if $retry->{jitter} && $delay > 0;
+    return $delay;
+}
+
+sub _non_negative_number {
+    my ($value) = @_;
+    return defined($value) && $value =~ /\A(?:\d+(?:\.\d*)?|\.\d+)\z/ && $value >= 0;
+}
+
+sub _join_url {
+    my ($self, $path) = @_;
+    $path =~ s{\A/+}{};
+    return $self->{base_url} . '/' . $path;
+}
+
+sub _retryable_status {
+    my ($status) = @_;
+    return 1 if $status == 408 || $status == 425 || $status == 429;
+    return 1 if $status >= 500 && $status <= 599;
+    return 0;
+}
+
+sub _request_id {
+    my ($response) = @_;
+    for my $name (qw(x-request-id request-id x-correlation-id)) {
+        my $value = $response->header($name);
+        return $value if defined $value && length $value;
     }
     return undef;
-}
-
-sub json {
-    my ($self) = @_;
-    return undef if !defined($self->{content}) || $self->{content} eq '';
-
-    my $decoded;
-    eval {
-        $decoded = decode_json($self->{content});
-        1;
-    } or do {
-        my $err = $@;
-        die HTTP::API::Client::Error->new(
-            category => 'decode',
-            message  => "JSON decode failure: $err",
-            status   => $self->{status},
-            method   => $self->{method},
-            url      => $self->{url},
-            response => $self,
-        );
-    };
-
-    return $decoded;
-}
-
-package HTTP::API::Client::Error;
-
-use strict;
-use warnings;
-use overload '""' => sub { $_[0]->{message} }, fallback => 1;
-
-sub new {
-    my ($class, %args) = @_;
-    return bless \%args, $class;
-}
-
-sub message     { $_[0]->{message} }
-sub category    { $_[0]->{category} }
-sub status      { $_[0]->{status} }
-sub method      { $_[0]->{method} }
-sub url         { $_[0]->{url} }
-sub request_id  { $_[0]->{request_id} }
-sub retry_after { $_[0]->{retry_after} }
-sub response    { $_[0]->{response} }
-
-sub retryable {
-    my ($self) = @_;
-    return 1 if $self->{category} eq 'transport';
-    return 0 unless defined $self->{status};
-    return 1 if $self->{status} == 429;
-    return 1 if $self->{status} == 502 || $self->{status} == 503 || $self->{status} == 504;
-    return 0;
 }
 
 1;
@@ -228,70 +257,76 @@ __END__
 
 =head1 NAME
 
-HTTP::API::Client - Small foundation for JSON-oriented HTTP API clients
+HTTP::API::Client - Small foundation for JSON HTTP API clients
 
 =head1 SYNOPSIS
 
-    use HTTP::API::Client;
+  use HTTP::API::Client;
 
-    my $api = HTTP::API::Client->new(
-        base_url => 'https://api.example.com',
-        headers  => {
-            Authorization => "Bearer $token",
-        },
-    );
+  my $api = HTTP::API::Client->new(
+      base_url => 'https://api.example.com',
+      headers  => { Authorization => "Bearer $token" },
+      timeout  => 10,
+      retry    => {
+          attempts   => 3,
+          base_delay => 0.25,
+          max_delay  => 5,
+          jitter     => 1,
+      },
+  );
 
-    my $res = $api->get('/users');
-    my $data = $res->json;
+  my $response = $api->get('/users');
+  my $users = $response->json;
 
 =head1 DESCRIPTION
 
-HTTP::API::Client is a small foundation for building HTTP API clients. It
-provides base URL handling, JSON request/response helpers, configurable
-headers and timeout, structured responses, and structured errors.
+HTTP::API::Client is a deliberately small base layer for building HTTP API
+clients. It provides base URL handling, default headers, JSON request/response
+helpers, timeout configuration, structured errors, and conservative retries.
+
+Retry is enabled by default for GET, HEAD, PUT, DELETE, and OPTIONS. POST and
+PATCH are not retried automatically. Retryable failures include transport
+errors, HTTP 408, 425, 429, and 5xx responses.
 
 =head1 METHODS
 
 =head2 new
 
-    my $api = HTTP::API::Client->new(
-        base_url => 'https://api.example.com',
-        headers  => { ... },
-        timeout  => 30,
-    );
+  my $api = HTTP::API::Client->new(
+      base_url => 'https://api.example.com',
+      headers  => { ... },
+      timeout  => 10,
+      retry    => { attempts => 3 },
+  );
 
-=head2 get / post / put / patch / delete
+C<base_url> is required. C<headers>, C<timeout>, and C<retry> are optional.
+Retry defaults to three attempts with exponential backoff and jitter.
+
+=head2 get, post, put, patch, delete
 
 Convenience methods around C<request>.
 
 =head2 request
 
-    my $res = $api->request('POST', '/items', json => { name => 'example' });
+  my $response = $api->request('POST', '/items', json => { ... });
 
-On a successful 2xx response, returns an C<HTTP::API::Client::Response>.
-Non-2xx responses throw C<HTTP::API::Client::Error>.
+Pass C<json> to encode a Perl value as JSON, or C<content> to send raw content.
+Per-request C<headers> override default headers. Pass C<retry =E<gt> 0> to
+disable retry for one request, or a retry hash to override the policy.
 
-=head1 ERROR CATEGORIES
+Non-2xx responses throw L<HTTP::API::Client::Error> after retry is exhausted.
 
-=over 4
+=head1 RETRY POLICY
 
-=item * C<transport>
+The retry hash accepts C<attempts>, C<base_delay>, C<max_delay>, C<jitter>, and
+C<methods>. Exponential backoff is capped by C<max_delay>. A numeric
+C<Retry-After> response header takes precedence over the calculated delay.
 
-The underlying transport failed.
+=head1 ERROR HANDLING
 
-=item * C<http>
-
-An HTTP response outside the 2xx range was received.
-
-=item * C<encode>
-
-A request could not be encoded as JSON.
-
-=item * C<decode>
-
-A response could not be decoded as JSON.
-
-=back
+Errors expose stable fields such as C<category>, C<status>, C<method>, C<url>,
+C<retryable>, C<retry_after>, and C<request_id>. Exact error message wording is
+not intended as a machine-readable API.
 
 =head1 LICENSE
 
