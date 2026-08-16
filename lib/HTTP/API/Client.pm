@@ -11,7 +11,7 @@ use HTTP::API::Client::Response;
 use HTTP::API::Client::Error;
 use HTTP::API::Client::Pagination;
 
-our $VERSION = '0.04';
+our $VERSION = '0.05';
 
 sub new {
     my ($class, %args) = @_;
@@ -33,6 +33,9 @@ sub new {
     die "retry must be a hash reference\n" if ref($retry) ne 'HASH';
     $retry = _normalize_retry($retry);
 
+    my $hooks = exists $args{hooks} ? delete($args{hooks}) : {};
+    $hooks = _normalize_hooks($hooks);
+
     die "unknown constructor option: $_\n" for sort keys %args;
 
     my $self = bless {
@@ -41,6 +44,7 @@ sub new {
         timeout   => $timeout,
         transport => $transport,
         retry     => $retry,
+        hooks     => $hooks,
     }, $class;
 
     $self->{http} = HTTP::Tiny->new(timeout => $timeout) if !$transport;
@@ -50,6 +54,7 @@ sub new {
 sub base_url { $_[0]->{base_url} }
 sub timeout  { $_[0]->{timeout} }
 sub retry    { +{ %{ $_[0]->{retry} }, methods => [ @{ $_[0]->{retry}{methods} } ] } }
+sub hooks    { _clone_hooks($_[0]->{hooks}) }
 
 sub get    { my ($self, $path, %opts) = @_; return $self->request('GET',    $path, %opts) }
 sub post   { my ($self, $path, %opts) = @_; return $self->request('POST',   $path, %opts) }
@@ -103,14 +108,41 @@ sub request {
         $retry = $retry ? $self->{retry} : _normalize_retry({ attempts => 1 });
     }
 
+    my $request_hooks = exists $opts{hooks} ? _normalize_hooks(delete($opts{hooks})) : {};
+    my $hooks = _merge_hooks($self->{hooks}, $request_hooks);
+
     die "unknown request option: $_\n" for sort keys %opts;
 
     my $attempts = _method_is_retryable($method, $retry) ? $retry->{attempts} : 1;
     my $attempt = 0;
 
     while (++$attempt <= $attempts) {
-        my ($response, $error) = $self->_request_once($method, $url, \%headers, $content);
-        return $response if $response;
+        my $context = {
+            method  => $method,
+            url     => $url,
+            headers => { %headers },
+            content => $content,
+            attempt => $attempt,
+        };
+
+        my $hook_error = _run_hooks($hooks->{before_request}, $context);
+        die _hook_error($hook_error, $method, $url) if $hook_error;
+
+        my ($response, $error) = $self->_request_once(
+            $context->{method},
+            $context->{url},
+            $context->{headers},
+            $context->{content},
+        );
+
+        if ($response) {
+            my $after_error = _run_hooks($hooks->{after_response}, $response, $context);
+            die _hook_error($after_error, $context->{method}, $context->{url}) if $after_error;
+            return $response;
+        }
+
+        my $on_error_error = _run_hooks($hooks->{on_error}, $error, $context);
+        die _hook_error($on_error_error, $context->{method}, $context->{url}) if $on_error_error;
 
         die $error if $attempt >= $attempts || !$error->retryable;
 
@@ -185,6 +217,68 @@ sub _request_once {
         response    => $response,
         message     => sprintf('HTTP %d%s', $response->status, defined($response->reason) && length($response->reason) ? ' ' . $response->reason : ''),
     ));
+}
+
+sub _normalize_hooks {
+    my ($hooks) = @_;
+    $hooks = {} if !defined $hooks;
+    die "hooks must be a hash reference\n" if ref($hooks) ne 'HASH';
+
+    my %copy = %$hooks;
+    my %normalized;
+    for my $name (qw(before_request after_response on_error)) {
+        my $value = delete $copy{$name};
+        next if !defined $value;
+
+        my @callbacks = ref($value) eq 'ARRAY' ? @$value : ($value);
+        die "hook $name must be a code reference or array reference of code references\n"
+            if grep { ref($_) ne 'CODE' } @callbacks;
+        $normalized{$name} = \@callbacks;
+    }
+
+    die "unknown hook: $_\n" for sort keys %copy;
+    return \%normalized;
+}
+
+sub _clone_hooks {
+    my ($hooks) = @_;
+    return {
+        map { $_ => [ @{ $hooks->{$_} || [] } ] }
+        qw(before_request after_response on_error)
+    };
+}
+
+sub _merge_hooks {
+    my ($first, $second) = @_;
+    return {
+        map {
+            $_ => [
+                @{ $first->{$_} || [] },
+                @{ $second->{$_} || [] },
+            ]
+        } qw(before_request after_response on_error)
+    };
+}
+
+sub _run_hooks {
+    my ($callbacks, @args) = @_;
+    for my $callback (@{ $callbacks || [] }) {
+        my $ok = eval { $callback->(@args); 1 };
+        return $@ if !$ok;
+    }
+    return undef;
+}
+
+sub _hook_error {
+    my ($cause, $method, $url) = @_;
+    return $cause if blessed($cause) && $cause->isa('HTTP::API::Client::Error');
+    return HTTP::API::Client::Error->new(
+        category  => 'hook',
+        method    => $method,
+        url       => $url,
+        retryable => 0,
+        message   => "HTTP API client hook failed: $cause",
+    );
 }
 
 sub _normalize_retry {
@@ -294,6 +388,12 @@ HTTP::API::Client - Small foundation for JSON HTTP API clients
           max_delay  => 5,
           jitter     => 1,
       },
+      hooks => {
+          before_request => sub {
+              my ($ctx) = @_;
+              $ctx->{headers}{'X-Trace-Id'} = make_trace_id();
+          },
+      },
   );
 
   my $response = $api->get('/users');
@@ -316,7 +416,7 @@ HTTP::API::Client - Small foundation for JSON HTTP API clients
 HTTP::API::Client is a deliberately small base layer for building HTTP API
 clients. It provides base URL handling, default headers, JSON request/response
 helpers, timeout configuration, structured errors, conservative retries,
-pagination helpers, and normalized rate-limit metadata.
+pagination helpers, normalized rate-limit metadata, and lifecycle hooks.
 
 Retry is enabled by default for GET, HEAD, PUT, DELETE, and OPTIONS. POST and
 PATCH are not retried automatically. Retryable failures include transport
@@ -332,10 +432,11 @@ report an exhausted rate limit.
       headers  => { ... },
       timeout  => 10,
       retry    => { attempts => 3 },
+      hooks    => { ... },
   );
 
-C<base_url> is required. C<headers>, C<timeout>, and C<retry> are optional.
-Retry defaults to three attempts with exponential backoff and jitter.
+C<base_url> is required. C<headers>, C<timeout>, C<retry>, and C<hooks> are
+optional. Retry defaults to three attempts with exponential backoff and jitter.
 
 =head2 get, post, put, patch, delete
 
@@ -359,11 +460,27 @@ C<next_url>, C<page>, and C<cursor>.
 
 Pass C<json> to encode a Perl value as JSON, or C<content> to send raw content.
 Per-request C<headers> override default headers. Pass C<retry =E<gt> 0> to
-disable retry for one request, or a retry hash to override the policy.
+disable retry for one request, or a retry hash to override the policy. A
+C<hooks> hash can add request-local hooks after client-level hooks.
 
 Non-2xx responses throw L<HTTP::API::Client::Error> after retry is exhausted.
 Successful responses expose normalized rate-limit metadata through
 C<$response-E<gt>rate_limit>.
+
+=head1 HOOKS
+
+Hooks may be configured on the client or per request. Supported hook names are
+C<before_request>, C<after_response>, and C<on_error>. Each value may be a
+coderef or an arrayref of coderefs.
+
+C<before_request> receives a mutable request context hash containing C<method>,
+C<url>, C<headers>, C<content>, and C<attempt>. It runs immediately before each
+transport attempt. C<after_response> receives the successful response object
+and request context. C<on_error> receives the structured error and request
+context before retry is considered.
+
+Request-local hooks run after client-level hooks. Hook failures are wrapped as
+non-retryable C<hook> errors.
 
 =head1 RETRY POLICY
 
@@ -382,8 +499,9 @@ C<used>, C<resource>, reset metadata, C<exhausted>, and C<wait_seconds>.
 =head1 ERROR HANDLING
 
 Errors expose stable fields such as C<category>, C<status>, C<method>, C<url>,
-C<retryable>, C<retry_after>, C<request_id>, and C<rate_limit>. Exact error
-message wording is not intended as a machine-readable API.
+C<retryable>, C<retry_after>, C<request_id>, and C<rate_limit>. Hook failures
+use the C<hook> category and are not retryable. Exact error message wording is
+not intended as a machine-readable API.
 
 =head1 LICENSE
 
