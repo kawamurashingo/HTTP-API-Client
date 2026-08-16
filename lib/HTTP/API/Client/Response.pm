@@ -4,6 +4,7 @@ use strict;
 use warnings;
 use JSON::PP qw(decode_json);
 use HTTP::API::Client::Error;
+use HTTP::API::Client::RateLimit;
 
 sub new {
     my ($class, %args) = @_;
@@ -25,6 +26,7 @@ sub method  { $_[0]->{method} }
 sub url     { $_[0]->{url} }
 sub is_success { $_[0]->{status} >= 200 && $_[0]->{status} < 300 }
 sub header { my ($self, $name) = @_; return $self->{headers}{lc $name} }
+sub rate_limit { HTTP::API::Client::RateLimit->from_headers($_[0]->{headers}) }
 
 sub json {
     my ($self) = @_;
