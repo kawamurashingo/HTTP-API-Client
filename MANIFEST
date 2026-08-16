@@ -11,5 +11,6 @@ t/00-load.t
 t/client.t
 t/hooks.t
 t/pagination.t
+t/query.t
 t/rate-limit.t
 t/retry.t
