@@ -21,6 +21,9 @@ my $api = HTTP::API::Client->new(
     },
 );
 
+is $api->base_url, 'https://api.example.test', 'normalizes base url';
+is $api->timeout, 5, 'timeout retained';
+
 my $res = $api->post('/items', json => { name => 'Alice' }, headers => { 'X-Test' => 'yes' });
 is $res->status, 200, 'status';
 ok $res->is_success, 'success';
@@ -33,8 +36,12 @@ is $calls[0][2]{headers}{'X-Test'}, 'yes', 'request header';
 is $calls[0][2]{headers}{'content-type'}, 'application/json', 'JSON content type';
 is_deeply decode_json($calls[0][2]{content}), { name => 'Alice' }, 'JSON encoded';
 
+my $absolute = $api->get('https://other.example.test/status');
+is $calls[1][1], 'https://other.example.test/status', 'absolute URL accepted';
+
 my $bad_json_api = HTTP::API::Client->new(
     base_url => 'https://api.example.test',
+    retry => { attempts => 1 },
     transport => sub { +{ status => 200, reason => 'OK', headers => {}, content => 'not-json' } },
 );
 my $decode_error;
@@ -44,6 +51,7 @@ is $decode_error->category, 'decode', 'decode category';
 
 my $error_api = HTTP::API::Client->new(
     base_url => 'https://api.example.test',
+    retry => { attempts => 1 },
     transport => sub {
         return {
             status => 429,
@@ -65,6 +73,7 @@ like "$http_error", qr/^HTTP 429/, 'stringifies to useful message';
 
 my $transport_error_api = HTTP::API::Client->new(
     base_url => 'https://api.example.test',
+    retry => { attempts => 1 },
     transport => sub { die "socket exploded\n" },
 );
 my $transport_error;
