@@ -9,3 +9,4 @@ lib/HTTP/API/Client/Response.pm
 t/00-load.t
 t/client.t
 t/pagination.t
+t/retry.t
