@@ -26,6 +26,9 @@ sub new {
     return $self;
 }
 
+sub base_url { $_[0]->{base_url} }
+sub timeout  { $_[0]->{timeout} }
+
 sub get    { my ($self, $path, %opts) = @_; return $self->request('GET',    $path, %opts) }
 sub post   { my ($self, $path, %opts) = @_; return $self->request('POST',   $path, %opts) }
 sub put    { my ($self, $path, %opts) = @_; return $self->request('PUT',    $path, %opts) }
@@ -40,7 +43,15 @@ sub request {
 
     my $content;
     if (exists $opts{json}) {
-        $content = encode_json($opts{json});
+        eval { $content = encode_json($opts{json}); 1 } or do {
+            my $err = $@;
+            die HTTP::API::Client::Error->new(
+                category => 'encode',
+                message  => "JSON encode failure: $err",
+                method   => $method,
+                url      => $url,
+            );
+        };
         $headers{'content-type'} ||= 'application/json';
     }
     elsif (exists $opts{content}) {
@@ -271,6 +282,10 @@ The underlying transport failed.
 =item * C<http>
 
 An HTTP response outside the 2xx range was received.
+
+=item * C<encode>
+
+A request could not be encoded as JSON.
 
 =item * C<decode>
 
