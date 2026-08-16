@@ -2,7 +2,7 @@
 
 A small, dependency-light foundation for building JSON HTTP API clients in Perl.
 
-The goal is not to replace `HTTP::Tiny`, `LWP`, or `Mojo::UserAgent`. It adds the API-client layer applications repeatedly rebuild: base URLs, JSON request/response handling, default headers, timeout configuration, structured errors, conservative retries, pagination, rate-limit handling, and lifecycle hooks.
+The goal is not to replace `HTTP::Tiny`, `LWP`, or `Mojo::UserAgent`. It adds the API-client layer applications repeatedly rebuild: base URLs, JSON request/response handling, default headers, timeout configuration, structured errors, conservative retries, pagination, rate-limit handling, lifecycle hooks, and query parameter encoding.
 
 ## Basic usage
 
@@ -26,6 +26,22 @@ my $api = HTTP::API::Client->new(
 my $response = $api->get('/users');
 my $data = $response->json;
 ```
+
+## Query parameters
+
+Pass a hash reference as `query` instead of building query strings by hand:
+
+```perl
+my $response = $api->get('/users',
+    query => {
+        state => 'active',
+        tag   => ['admin', 'staff'],
+        after => undef,
+    },
+);
+```
+
+Values are percent-encoded. Array references generate repeated keys, undefined values are omitted, existing query strings are preserved, and parameters are inserted before URL fragments. `before_request` hooks see the final encoded URL.
 
 ## Hooks
 
@@ -164,6 +180,7 @@ $api->post('/jobs',
 
 - base URL handling
 - default and per-request headers
+- first-class query parameter encoding
 - JSON request encoding and response decoding
 - configurable timeout
 - structured transport/HTTP/encode/decode errors

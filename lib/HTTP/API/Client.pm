@@ -11,7 +11,7 @@ use HTTP::API::Client::Response;
 use HTTP::API::Client::Error;
 use HTTP::API::Client::Pagination;
 
-our $VERSION = '0.05';
+our $VERSION = '0.06';
 
 sub new {
     my ($class, %args) = @_;
@@ -64,11 +64,7 @@ sub delete { my ($self, $path, %opts) = @_; return $self->request('DELETE', $pat
 
 sub paginate {
     my ($self, $path, %opts) = @_;
-    return HTTP::API::Client::Pagination->new(
-        client => $self,
-        path   => $path,
-        %opts,
-    );
+    return HTTP::API::Client::Pagination->new(client => $self, path => $path, %opts);
 }
 
 sub request {
@@ -78,6 +74,10 @@ sub request {
     die "path is required\n" if !defined $path;
 
     my $url = $path =~ m{\Ahttps?://} ? $path : $self->_join_url($path);
+
+    my $query = exists $opts{query} ? delete($opts{query}) : {};
+    die "query must be a hash reference\n" if ref($query) ne 'HASH';
+    $url = _append_query($url, $query);
 
     my %headers = (%{ $self->{headers} }, %{ delete($opts{headers}) || {} });
     my $content;
@@ -339,6 +339,47 @@ sub _retry_delay {
     return $delay;
 }
 
+sub _append_query {
+    my ($url, $query) = @_;
+    my @pairs;
+
+    for my $key (sort keys %$query) {
+        my $value = $query->{$key};
+        next if !defined $value;
+
+        my @values;
+        if (ref($value) eq 'ARRAY') {
+            @values = grep { defined $_ } @$value;
+        }
+        elsif (ref($value)) {
+            die "query values must be scalars, array references, or undef\n";
+        }
+        else {
+            @values = ($value);
+        }
+
+        push @pairs, map { _uri_escape($key) . '=' . _uri_escape($_) } @values;
+    }
+
+    return $url if !@pairs;
+
+    my $fragment = '';
+    if ($url =~ s/(#.*)\z//) {
+        $fragment = $1;
+    }
+
+    my $separator = index($url, '?') >= 0 ? '&' : '?';
+    return $url . $separator . join('&', @pairs) . $fragment;
+}
+
+sub _uri_escape {
+    my ($value) = @_;
+    my $bytes = defined($value) ? "$value" : '';
+    utf8::encode($bytes) if utf8::is_utf8($bytes);
+    $bytes =~ s/([^A-Za-z0-9\-._~])/sprintf('%%%02X', ord($1))/ge;
+    return $bytes;
+}
+
 sub _non_negative_number {
     my ($value) = @_;
     return defined($value) && $value =~ /\A(?:\d+(?:\.\d*)?|\.\d+)\z/ && $value >= 0;
@@ -459,6 +500,8 @@ C<next_url>, C<page>, and C<cursor>.
   my $response = $api->request('POST', '/items', json => { ... });
 
 Pass C<json> to encode a Perl value as JSON, or C<content> to send raw content.
+Pass C<query> as a hash reference to append percent-encoded query parameters.
+Array-reference values produce repeated keys and undefined values are omitted.
 Per-request C<headers> override default headers. Pass C<retry =E<gt> 0> to
 disable retry for one request, or a retry hash to override the policy. A
 C<hooks> hash can add request-local hooks after client-level hooks.
