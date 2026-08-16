@@ -4,7 +4,9 @@ MANIFEST
 README.md
 lib/HTTP/API/Client.pm
 lib/HTTP/API/Client/Error.pm
+lib/HTTP/API/Client/Pagination.pm
 lib/HTTP/API/Client/Response.pm
 t/00-load.t
 t/client.t
+t/pagination.t
 t/retry.t

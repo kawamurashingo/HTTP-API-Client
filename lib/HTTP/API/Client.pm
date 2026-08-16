@@ -9,8 +9,9 @@ use Time::HiRes qw(sleep);
 
 use HTTP::API::Client::Response;
 use HTTP::API::Client::Error;
+use HTTP::API::Client::Pagination;
 
-our $VERSION = '0.02';
+our $VERSION = '0.03';
 
 sub new {
     my ($class, %args) = @_;
@@ -55,6 +56,15 @@ sub post   { my ($self, $path, %opts) = @_; return $self->request('POST',   $pat
 sub put    { my ($self, $path, %opts) = @_; return $self->request('PUT',    $path, %opts) }
 sub patch  { my ($self, $path, %opts) = @_; return $self->request('PATCH',  $path, %opts) }
 sub delete { my ($self, $path, %opts) = @_; return $self->request('DELETE', $path, %opts) }
+
+sub paginate {
+    my ($self, $path, %opts) = @_;
+    return HTTP::API::Client::Pagination->new(
+        client => $self,
+        path   => $path,
+        %opts,
+    );
+}
 
 sub request {
     my ($self, $method, $path, %opts) = @_;
@@ -278,11 +288,23 @@ HTTP::API::Client - Small foundation for JSON HTTP API clients
   my $response = $api->get('/users');
   my $users = $response->json;
 
+  my $pager = $api->paginate(
+      '/users',
+      mode  => 'cursor',
+      items => 'data.users',
+      next  => 'meta.next_cursor',
+  );
+
+  while (my $user = $pager->next) {
+      ...
+  }
+
 =head1 DESCRIPTION
 
 HTTP::API::Client is a deliberately small base layer for building HTTP API
 clients. It provides base URL handling, default headers, JSON request/response
-helpers, timeout configuration, structured errors, and conservative retries.
+helpers, timeout configuration, structured errors, conservative retries, and
+pagination helpers.
 
 Retry is enabled by default for GET, HEAD, PUT, DELETE, and OPTIONS. POST and
 PATCH are not retried automatically. Retryable failures include transport
@@ -305,6 +327,18 @@ Retry defaults to three attempts with exponential backoff and jitter.
 =head2 get, post, put, patch, delete
 
 Convenience methods around C<request>.
+
+=head2 paginate
+
+  my $pager = $api->paginate(
+      '/users',
+      mode  => 'next_url',
+      items => 'data.items',
+      next  => 'links.next',
+  );
+
+Returns an L<HTTP::API::Client::Pagination> iterator. Supported modes are
+C<next_url>, C<page>, and C<cursor>.
 
 =head2 request
 
