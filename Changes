@@ -1,0 +1,6 @@
+Revision history for HTTP-API-Client
+
+0.01  2026-08-16
+    - Initial release.
+    - Base URL, headers, JSON request/response handling, timeout configuration.
+    - Structured HTTP, transport, and decode errors.
