@@ -1,5 +1,27 @@
 Revision history for HTTP-API-Client
 
+0.09  2026-08-16
+    - Add explicit response body and Content-Type helpers.
+    - Add text, has_content, content_type, and is_json response methods.
+    - Treat empty and whitespace-only response bodies as undef in json().
+    - Recognize application/json and application/*+json media types.
+    - Document that explicit json() decoding does not depend on Content-Type.
+    - Document defensive-copy behavior for response headers.
+
+0.08  2026-08-16
+    - Add lightweight request observability metadata.
+    - Add elapsed transport time to responses and errors.
+    - Normalize X-Request-Id, Request-Id, and X-Correlation-Id on responses.
+    - Expose started_at, elapsed, and request_id in lifecycle hook contexts.
+    - Keep logging, metrics, tracing, and telemetry backends outside the core.
+
+0.07  2026-08-16
+    - Add HTTP::API::Client::Auth authentication hook helpers.
+    - Add Bearer token and HTTP Basic authentication helpers.
+    - Add API-key authentication via headers or query parameters.
+    - Keep authentication composable through before_request lifecycle hooks.
+    - Keep OAuth token acquisition and refresh flows outside the core.
+
 0.06  2026-08-16
     - Add first-class query parameter encoding to all requests.
     - Support repeated keys with array references and omit undefined values.
