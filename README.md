@@ -2,7 +2,7 @@
 
 A small, dependency-light foundation for building JSON HTTP API clients in Perl.
 
-The goal is not to replace `HTTP::Tiny`, `LWP`, or `Mojo::UserAgent`. It adds the API-client layer applications repeatedly rebuild: base URLs, JSON request/response handling, default headers, timeout configuration, structured errors, conservative retries, pagination, and rate-limit handling.
+The goal is not to replace `HTTP::Tiny`, `LWP`, or `Mojo::UserAgent`. It adds the API-client layer applications repeatedly rebuild: base URLs, JSON request/response handling, default headers, timeout configuration, structured errors, conservative retries, pagination, rate-limit handling, and lifecycle hooks.
 
 ## Basic usage
 
@@ -26,6 +26,47 @@ my $api = HTTP::API::Client->new(
 my $response = $api->get('/users');
 my $data = $response->json;
 ```
+
+## Hooks
+
+Client-level and per-request hooks make it possible to add authentication, logging, metrics, tracing, or other cross-cutting behavior without subclassing.
+
+```perl
+my $api = HTTP::API::Client->new(
+    base_url => 'https://api.example.com',
+    hooks => {
+        before_request => sub {
+            my ($ctx) = @_;
+            $ctx->{headers}{Authorization} = "Bearer $token";
+        },
+        after_response => sub {
+            my ($response, $ctx) = @_;
+            log_status($response->status);
+        },
+        on_error => sub {
+            my ($error, $ctx) = @_;
+            record_failure($error->category);
+        },
+    },
+);
+```
+
+`before_request` receives a mutable context containing `method`, `url`, `headers`, `content`, and the retry `attempt`. It runs immediately before each transport attempt. `after_response` runs after a successful response is received. `on_error` runs before retry is considered.
+
+Each hook can be a coderef or an arrayref of coderefs. Request-local hooks are appended after client-level hooks:
+
+```perl
+$api->get('/users',
+    hooks => {
+        before_request => sub {
+            my ($ctx) = @_;
+            $ctx->{headers}{'X-Request-Tag'} = 'users';
+        },
+    },
+);
+```
+
+Hook failures are surfaced as structured, non-retryable `hook` errors.
 
 ## Rate limits
 
@@ -130,11 +171,12 @@ $api->post('/jobs',
 - automatic retry with exponential backoff + jitter
 - normalized rate-limit metadata and reset-aware retry fallback
 - next-URL, page-number, and cursor pagination
+- client-level and per-request lifecycle hooks
 - injectable transport for tests and custom integration
 
 ## Planned
 
-Middleware/hooks and additional API-client ergonomics.
+Additional API-client ergonomics.
 
 ## License
 
