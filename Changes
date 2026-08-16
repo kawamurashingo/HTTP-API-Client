@@ -1,5 +1,11 @@
 Revision history for HTTP-API-Client
 
+0.06  2026-08-16
+    - Add first-class query parameter encoding to all requests.
+    - Support repeated keys with array references and omit undefined values.
+    - Preserve existing query strings and URL fragments when appending parameters.
+    - Expose the fully encoded URL to request lifecycle hooks.
+
 0.05  2026-08-16
     - Add client-level and per-request lifecycle hooks.
     - Add before_request, after_response, and on_error hooks.
